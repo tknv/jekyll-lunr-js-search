@@ -1,3 +1,112 @@
+require 'nokogiri'
+
+module Jekyll
+  module LunrJsSearch
+    class SearchEntry
+      def self.create(site, renderer)
+        if site.is_a?(Jekyll::Page) or site.is_a?(Jekyll::Document)
+          if defined?(site.date)
+            date = site.date
+          else
+            date = nil
+          end
+          categories = site.data['categories']
+          tags = site.data['tags']
+          title, url = extract_title_and_url(site)
+          is_post = site.is_a?(Jekyll::Document)
+          body = renderer.render(site)
+
+          SearchEntry.new(title, url, date, categories, tags, is_post, body, renderer)
+        else
+          raise 'Not supported'
+        end
+      end
+
+      def self.extract_title_and_url(item)
+        data = item.to_liquid
+        [ data['title'], data['url'] ]
+      end
+
+      attr_reader :title, :url, :date, :categories, :tags, :is_post, :body, :collection
+
+      def initialize(title, url, date, categories, tags, is_post, body, collection)
+        @title, @url, @date, @categories, @tags, @is_post, @body, @collection = title, url, date, categories, tags, is_post, body, collection
+      end
+
+      def strip_index_suffix_from_url!
+        @url.gsub!(/index\.html$/, '')
+      end
+
+      # remove anything that is in the stop words list from the text to be indexed
+      def strip_stopwords!(stopwords, min_length)
+        @body = @body.split.delete_if() do |x|
+          t = x.downcase.gsub(/[^a-z]/, '')
+          t.length < min_length || stopwords.include?(t)
+        end.join(' ')
+      end
+    end
+  end
+end
+require "v8"
+require "json"
+
+class V8::Object
+  def to_json
+    @context['JSON']['stringify'].call(self)
+  end
+
+  def to_hash
+    JSON.parse(to_json, :max_nesting => false)
+  end
+end
+require 'nokogiri'
+
+module Jekyll
+  module LunrJsSearch
+    class PageRenderer
+      def initialize(site)
+        @site = site
+      end
+      
+      # render item, but without using its layout
+      def prepare(item)
+        layout = item.data["layout"]
+        begin
+          item.data.delete("layout")
+
+          if item.is_a?(Jekyll::Document)          
+            output = Jekyll::Renderer.new(@site, item).run
+          else
+            item.render({}, @site.site_payload)
+            output = item.output  
+          end
+        ensure
+          # restore original layout
+          item.data["layout"] = layout
+        end
+      
+        output
+      end
+
+      # render the item, parse the output and get all text inside <p> elements
+      def render(item)
+        layoutless = item.dup
+
+        Nokogiri::HTML(prepare(layoutless)).text
+      end
+    end
+  end  
+end
+module Jekyll
+  module LunrJsSearch  
+    class SearchIndexFile < Jekyll::StaticFile
+      # Override write as the index.json index file has already been created 
+      def write(dest)
+        true
+      end
+    end
+  end
+end
 require 'fileutils'
 require 'net/http'
 require 'json'
@@ -25,12 +134,27 @@ module Jekyll
         }.merge!(config['lunr_search'] || {})
 
         @js_dir = lunr_config['js_dir']
-        gem_lunr = File.join(File.dirname(__FILE__), "../../build/lunr.min.js")
+        gem_lunr = File.join(File.dirname(__FILE__), "../js/lunr.min.js")
         @lunr_path = File.exist?(gem_lunr) ? gem_lunr : File.join(@js_dir, File.basename(gem_lunr))
         raise "Could not find #{@lunr_path}" if !File.exist?(@lunr_path)
 
+        gem_lunr_stem = File.join(File.dirname(__FILE__), "../js/lunr.stemmer.support.js")
+        @lunr_stem_path = File.exist?(gem_lunr_stem) ? gem_lunr_stem : File.join(@js_dir, File.basename(gem_lunr_stem))
+        raise "Could not find #{@lunr_stem_path}" if !File.exist?(@lunr_stem_path)
+
+        gem_lunr_jp = File.join(File.dirname(__FILE__), "../js/lunr.jp.js")
+        @lunr_jp_path = File.exist?(gem_lunr_jp) ? gem_lunr_jp : File.join(@js_dir, File.basename(gem_lunr_jp))
+        raise "Could not find #{@lunr_jp_path}" if !File.exist?(@lunr_jp_path)
+
+        gem_lunr_multi = File.join(File.dirname(__FILE__), "../js/lunr.multi.js")
+        @lunr_multi_path = File.exist?(gem_lunr_multi) ? gem_lunr_multi : File.join(@js_dir, File.basename(gem_lunr_multi))
+        raise "Could not find #{@lunr_multi_path}" if !File.exist?(@lunr_multi_path)
+
         ctx = V8::Context.new
         ctx.load(@lunr_path)
+        ctx.load(@lunr_stem_path)
+        ctx.load(@lunr_jp_path)
+        ctx.load(@lunr_multi_path)
         ctx['indexer'] = proc do |this|
           this.ref('id')
           lunr_config['fields'].each_pair do |name, boost|
@@ -141,115 +265,6 @@ module Jekyll
         items.reject! {|i| i.data['exclude_from_search'] }
 
         items
-      end
-    end
-  end
-end
-require "v8"
-require "json"
-
-class V8::Object
-  def to_json
-    @context['JSON']['stringify'].call(self)
-  end
-
-  def to_hash
-    JSON.parse(to_json, :max_nesting => false)
-  end
-end
-require 'nokogiri'
-
-module Jekyll
-  module LunrJsSearch
-    class PageRenderer
-      def initialize(site)
-        @site = site
-      end
-      
-      # render item, but without using its layout
-      def prepare(item)
-        layout = item.data["layout"]
-        begin
-          item.data.delete("layout")
-
-          if item.is_a?(Jekyll::Document)          
-            output = Jekyll::Renderer.new(@site, item).run
-          else
-            item.render({}, @site.site_payload)
-            output = item.output  
-          end
-        ensure
-          # restore original layout
-          item.data["layout"] = layout
-        end
-      
-        output
-      end
-
-      # render the item, parse the output and get all text inside <p> elements
-      def render(item)
-        layoutless = item.dup
-
-        Nokogiri::HTML(prepare(layoutless)).text
-      end
-    end
-  end  
-end
-require 'nokogiri'
-
-module Jekyll
-  module LunrJsSearch
-    class SearchEntry
-      def self.create(site, renderer)
-        if site.is_a?(Jekyll::Page) or site.is_a?(Jekyll::Document)
-          if defined?(site.date)
-            date = site.date
-          else
-            date = nil
-          end
-          categories = site.data['categories']
-          tags = site.data['tags']
-          title, url = extract_title_and_url(site)
-          is_post = site.is_a?(Jekyll::Document)
-          body = renderer.render(site)
-
-          SearchEntry.new(title, url, date, categories, tags, is_post, body, renderer)
-        else
-          raise 'Not supported'
-        end
-      end
-
-      def self.extract_title_and_url(item)
-        data = item.to_liquid
-        [ data['title'], data['url'] ]
-      end
-
-      attr_reader :title, :url, :date, :categories, :tags, :is_post, :body, :collection
-
-      def initialize(title, url, date, categories, tags, is_post, body, collection)
-        @title, @url, @date, @categories, @tags, @is_post, @body, @collection = title, url, date, categories, tags, is_post, body, collection
-      end
-
-      def strip_index_suffix_from_url!
-        @url.gsub!(/index\.html$/, '')
-      end
-
-      # remove anything that is in the stop words list from the text to be indexed
-      def strip_stopwords!(stopwords, min_length)
-        @body = @body.split.delete_if() do |x|
-          t = x.downcase.gsub(/[^a-z]/, '')
-          t.length < min_length || stopwords.include?(t)
-        end.join(' ')
-      end
-    end
-  end
-end
-module Jekyll
-  module LunrJsSearch  
-    class SearchIndexFile < Jekyll::StaticFile
-      # Override write as the index.json index file has already been created 
-      def write(dest)
-        true
       end
     end
   end
